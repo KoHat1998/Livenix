@@ -1,16 +1,25 @@
-# livenix
+# Livenix — Live Streaming App
 
-A new Flutter project.
+Livenix lets anyone **go live from their phone** and **watch live streams** from others — fast, simple, and low-latency.
 
-## Getting Started
+## What you can do
+- **Start a Live**: create a room in seconds and share the **Room ID**.
+- **Watch Lives**: browse the live list or **search by title / Room ID**.
+- **Host Controls**: go live / pause, mute mic, toggle camera, switch camera, end stream.
+- **Viewer Experience**: smooth playback, live status, viewer count, chat area.
+- **Clean UI**: dark theme with clear actions and big, easy buttons.
 
-This project is a starting point for a Flutter application.
+## How it works (short)
+- Hosts create a room and go live.
+- Viewers open the app, find a live (or enter Room ID), and start watching.
+- Designed for real-time video with scalable SFU architecture.
 
-A few resources to get you started if this is your first Flutter project:
+## What’s next
+- In-app share links & copy Room ID
+- Turn server & connection fallback for tough networks
+- Pin video to main view, reactions, and chat improvements
+- Optional login (profiles, follow creators)
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Try it
+- Build from source: `flutter pub get && flutter run`
+- Works on Android (emulator or device)

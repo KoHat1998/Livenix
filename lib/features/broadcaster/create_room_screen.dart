@@ -67,14 +67,7 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
                     prefixIcon: Icon(Icons.title),
                   ),
                 ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: nameCtrl,
-                  decoration: const InputDecoration(
-                    hintText: 'Your display name',
-                    prefixIcon: Icon(Icons.person_outline),
-                  ),
-                ),
+
                 const SizedBox(height: 20),
                 GradientButton(
                   label: 'Start',
@@ -94,17 +87,6 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
                       },
                       icon: const Icon(Icons.copy),
                       label: const Text('Copy ID'),
-                    ),
-                    const SizedBox(width: 12),
-                    OutlinedButton.icon(
-                      onPressed: () {
-                        // share later
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Share coming soon')),
-                        );
-                      },
-                      icon: const Icon(Icons.share_outlined),
-                      label: const Text('Share'),
                     ),
                   ],
                 )
