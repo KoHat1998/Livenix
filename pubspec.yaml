@@ -38,7 +38,6 @@ dependencies:
   provider: ^6.1.5+1
   google_fonts: ^6.3.0
   cached_network_image: ^3.4.1
-  flutter_launcher_icons: ^0.14.4
 
 dev_dependencies:
   flutter_test:
@@ -51,6 +50,7 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
   flutter_native_splash: ^2.4.6
+  flutter_launcher_icons: ^0.14.4
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -66,16 +66,16 @@ flutter:
 flutter_launcher_icons:
   android: true
   ios: false
-  image_path: assets/icons/app_icon.png
+  image_path: assets/icons/livenix_logo.png
   adaptive_icon_background: "#0E0F13"
-  adaptive_icon_foreground: assets/icons/app_icon.png
+  adaptive_icon_foreground: assets/icons/livenix_logo.png
 
 flutter_native_splash:
   android: true
   ios: false
   color: "#0E0F13"
-  image: assets/icons/app_icon.png
+  image: assets/icons/livenix_logo.png
   android_12:
-    image: assets/icons/app_icon.png
+    image: assets/icons/livenix_logo.png
     icon_background_color: "#0E0F13"
 

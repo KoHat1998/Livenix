@@ -2,12 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../features/splash/splash_screen.dart';
-import '../features/auth/login_screen.dart';
 import '../features/home/home_screen.dart';
 import '../features/lives_list/lives_list_screen.dart';
 import '../features/viewer/viewer_panel_screen.dart';
 import '../features/broadcaster/create_room_screen.dart';
 import '../features/broadcaster/broadcaster_dashboard_screen.dart';
+import '../features/auth/signin_screen.dart';
+import '../features/auth/signup_screen.dart';
 import '../data/models/live_room.dart';
 
 final appRouter = GoRouter(
@@ -18,8 +19,12 @@ final appRouter = GoRouter(
       builder: (context, state) => const SplashScreen(),
     ),
     GoRoute(
-      path: '/auth',
-      builder: (context, state) => const LoginScreen(),
+      path: '/auth/signin',
+      builder: (context, state) => const SignInScreen(),
+    ),
+    GoRoute(
+      path: '/auth/signup',
+      builder: (context, state) => const SignUpScreen(),
     ),
     GoRoute(
       path: '/home',
@@ -49,7 +54,8 @@ final appRouter = GoRouter(
     ),
   ],
   redirect: (context, state) {
-    // Simple splash → home redirect after a moment; handled in SplashScreen.
+    // Keep old links working: /auth -> /auth/signin
+    if (state.uri.toString() == '/auth') return '/auth/signin';
     return null;
   },
   errorBuilder: (context, state) => Scaffold(
