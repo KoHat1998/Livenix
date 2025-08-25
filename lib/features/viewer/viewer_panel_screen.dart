@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+
+import '../../core/agora_config.dart';
+import '../../services/agora_service.dart';
 import '../../data/models/live_room.dart';
 import '../../data/models/message.dart';
 import '../../theme/theme.dart';
@@ -14,12 +18,19 @@ class ViewerPanelScreen extends StatefulWidget {
 }
 
 class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
+  final AgoraService _agora = AgoraService.instance;
+
   late List<Message> messages;
   bool muted = false;
+
+  int? _hostUid;            // first remote we detect (host)
+  late final String _channelId;
 
   @override
   void initState() {
     super.initState();
+
+    // demo chat data
     messages = List.generate(
       12,
           (i) => Message(
@@ -30,17 +41,39 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
         isHost: i % 3 == 0,
       ),
     );
+
+    // Join Agora as audience
+    _channelId = widget.room?.id ?? defaultTestChannel;
+    _agora.joinAsAudience(channelId: _channelId, token: agoraTempToken);
+
+    // Track remote user(s) and display the first one (host)
+    _agora.remoteUids.addListener(() {
+      if (!mounted) return;
+      setState(() {
+        _hostUid = _agora.remoteUids.value.isEmpty
+            ? null
+            : _agora.remoteUids.value.first;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _agora.leave(); // leave channel when exiting viewer
+    super.dispose();
   }
 
   void _send(String text) {
     setState(() {
-      messages.add(Message(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        from: 'Me',
-        text: text,
-        ts: DateTime.now(),
-        isHost: false,
-      ));
+      messages.add(
+        Message(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          from: 'Me',
+          text: text,
+          ts: DateTime.now(),
+          isHost: false,
+        ),
+      );
     });
   }
 
@@ -52,24 +85,41 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
         title: Text(room?.title ?? 'Live Stream'),
         actions: [
           IconButton(
-            onPressed: () => setState(() => muted = !muted),
+            onPressed: () async {
+              setState(() => muted = !muted);
+              // Mute/unmute remote playback audio (0 = mute, 100 = normal)
+              await _agora.engine.adjustPlaybackSignalVolume(muted ? 0 : 100);
+            },
             icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
           ),
         ],
       ),
       body: Column(
         children: [
-          // Video stage placeholder
+          // Video stage (remote view if available)
           AspectRatio(
             aspectRatio: 16 / 9,
             child: Stack(
               children: [
-                Container(
-                  decoration: BoxDecoration(
-                    gradient: AppTheme.primaryGradient,
-                  ),
-                  child: const Center(
-                    child: Icon(Icons.live_tv_outlined, size: 64),
+                ClipRRect(
+                  borderRadius: BorderRadius.zero,
+                  child: (_hostUid != null)
+                      ? AgoraVideoView(
+                    controller: VideoViewController.remote(
+                      rtcEngine: _agora.engine,
+                      canvas: VideoCanvas(uid: _hostUid!),
+                      connection: RtcConnection(
+                        channelId: _agora.currentChannelId ?? _channelId,
+                      ),
+                    ),
+                  )
+                      : Container(
+                    decoration: BoxDecoration(
+                      gradient: AppTheme.primaryGradient,
+                    ),
+                    child: const Center(
+                      child: Icon(Icons.live_tv_outlined, size: 64),
+                    ),
                   ),
                 ),
                 Positioned(
@@ -130,7 +180,8 @@ class _ChatBubble extends StatelessWidget {
         children: [
           CircleAvatar(
             radius: 14,
-            backgroundColor: isHost ? AppTheme.primary : AppTheme.surfaceVariant,
+            backgroundColor:
+            isHost ? AppTheme.primary : AppTheme.surfaceVariant,
             child: Text(
               msg.from.characters.first.toUpperCase(),
               style: const TextStyle(fontSize: 12),

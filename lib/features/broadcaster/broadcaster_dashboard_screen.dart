@@ -1,4 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+
+import '../../core/agora_config.dart';
+import '../../services/agora_service.dart';
 import '../../data/models/live_room.dart';
 import '../../data/models/message.dart';
 import '../../theme/theme.dart';
@@ -17,6 +23,8 @@ class BroadcasterDashboardScreen extends StatefulWidget {
 
 class _BroadcasterDashboardScreenState
     extends State<BroadcasterDashboardScreen> {
+  final AgoraService _agora = AgoraService.instance;
+
   bool isLive = false;
   bool micOn = true;
   bool camOn = true;
@@ -32,13 +40,52 @@ class _BroadcasterDashboardScreenState
           (i) => Message(
         id: '$i',
         from: i % 4 == 0 ? 'Moderator' : 'Viewer $i',
-        text: i % 4 == 0
-            ? 'Welcome to the stream 🎉'
-            : 'Nice stream! #$i',
+        text: i % 4 == 0 ? 'Welcome to the stream 🎉' : 'Nice stream! #$i',
         ts: DateTime.now().subtract(Duration(minutes: 12 - i)),
         isHost: i % 4 == 0,
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    // make sure we leave the channel if user navigates away while live
+    if (isLive) {
+      _agora.leave();
+    }
+    super.dispose();
+  }
+
+  Future<void> _goLiveToggle() async {
+    if (!isLive) {
+      // Request permissions first
+      final statuses =
+      await [Permission.camera, Permission.microphone].request();
+      final camOk = statuses[Permission.camera]?.isGranted ?? false;
+      final micOk = statuses[Permission.microphone]?.isGranted ?? false;
+      if (!camOk || !micOk) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Camera/Mic permission required')),
+          );
+        }
+        return;
+      }
+
+      final channel = widget.room?.id ?? defaultTestChannel;
+      await _agora.joinAsBroadcaster(
+        channelId: channel,
+        token: agoraTempToken, // empty is OK if your Agora project has no cert
+      );
+      setState(() => isLive = true);
+
+      // apply current UI toggles to engine
+      await _agora.setMicOn(micOn);
+      await _agora.setCameraOn(camOn);
+    } else {
+      await _agora.leave();
+      setState(() => isLive = false);
+    }
   }
 
   void _openChatSheet() {
@@ -58,12 +105,9 @@ class _BroadcasterDashboardScreenState
               scrollController: scrollController,
               messages: messages,
               onSend: (text) {
-                // add message as Host
                 messages.add(
                   Message(
-                    id: DateTime.now()
-                        .millisecondsSinceEpoch
-                        .toString(),
+                    id: DateTime.now().millisecondsSinceEpoch.toString(),
                     from: 'Host',
                     text: text,
                     ts: DateTime.now(),
@@ -75,7 +119,7 @@ class _BroadcasterDashboardScreenState
           },
         );
       },
-    ).then((_) => setState(() {})); // rebuild after closing
+    ).then((_) => setState(() {})); // refresh after closing
   }
 
   @override
@@ -87,18 +131,30 @@ class _BroadcasterDashboardScreenState
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
-            // Hero preview card (live video placeholder)
+            // Live preview (Agora when live)
             AspectRatio(
               aspectRatio: 16 / 9,
-              child: Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  gradient: AppTheme.primaryGradient,
-                ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
                 child: Stack(
                   children: [
-                    const Center(
-                      child: Icon(Icons.videocam_outlined, size: 64),
+                    // Show local camera when live, placeholder otherwise
+                    Positioned.fill(
+                      child: isLive
+                          ? AgoraVideoView(
+                        controller: VideoViewController(
+                          rtcEngine: _agora.engine,
+                          canvas: const VideoCanvas(uid: 0), // local preview
+                        ),
+                      )
+                          : Container(
+                        decoration: BoxDecoration(
+                          gradient: AppTheme.primaryGradient,
+                        ),
+                        child: const Center(
+                          child: Icon(Icons.videocam_outlined, size: 64),
+                        ),
+                      ),
                     ),
                     Positioned(
                       left: 12,
@@ -146,22 +202,50 @@ class _BroadcasterDashboardScreenState
               crossAxisSpacing: 12,
               childAspectRatio: 1.9,
               children: [
+                // Mic
                 ControlTile(
                   icon: micOn ? Icons.mic : Icons.mic_off,
                   label: micOn ? 'Mute Microphone' : 'Unmute Microphone',
-                  onTap: () => setState(() => micOn = !micOn),
+                  onTap: () async {
+                    setState(() => micOn = !micOn);
+                    if (isLive) {
+                      await _agora.setMicOn(micOn);
+                    }
+                  },
                 ),
+                // Camera
                 ControlTile(
                   icon: camOn ? Icons.videocam : Icons.videocam_off,
                   label: camOn ? 'Turn Camera Off' : 'Turn Camera On',
-                  onTap: () => setState(() => camOn = !camOn),
+                  onTap: () async {
+                    setState(() => camOn = !camOn);
+                    if (isLive) {
+                      await _agora.setCameraOn(camOn);
+                    }
+                  },
                 ),
+                // Go Live / Stop
                 ControlTile(
                   icon: isLive ? Icons.pause_circle : Icons.play_circle,
-                  label: isLive ? 'Pause Stream' : 'Go Live',
-                  onTap: () => setState(() => isLive = !isLive),
+                  label: isLive ? 'Stop Live' : 'Go Live',
+                  onTap: _goLiveToggle,
                   highlight: true,
                 ),
+                // Switch camera
+                ControlTile(
+                  icon: Icons.flip_camera_android_outlined,
+                  label: 'Switch Camera',
+                  onTap: () async {
+                    if (!isLive) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Go live to switch camera')),
+                      );
+                      return;
+                    }
+                    await _agora.switchCamera();
+                  },
+                ),
+                // Share
                 ControlTile(
                   icon: Icons.share_outlined,
                   label: 'Share Stream Link',
@@ -169,16 +253,11 @@ class _BroadcasterDashboardScreenState
                     const SnackBar(content: Text('Share coming soon')),
                   ),
                 ),
-                // 👉 Chat Settings opens the slide-up chat panel
+                // Chat
                 ControlTile(
                   icon: Icons.chat_bubble_outline,
                   label: 'Chat Settings',
                   onTap: _openChatSheet,
-                ),
-                ControlTile(
-                  icon: Icons.settings_outlined,
-                  label: 'Advanced Settings',
-                  onTap: () {},
                 ),
               ],
             ),
@@ -194,7 +273,13 @@ class _BroadcasterDashboardScreenState
                   borderRadius: BorderRadius.circular(16),
                 ),
               ),
-              onPressed: () => Navigator.of(context).pop(),
+              onPressed: () async {
+                if (isLive) {
+                  await _agora.leave();
+                  setState(() => isLive = false);
+                }
+                context.pop(); // back to previous screen
+              },
               icon: const Icon(Icons.stop_circle_outlined),
               label: const Text('End Stream'),
             ),
@@ -242,7 +327,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      // rounded top & dark surface
       decoration: const BoxDecoration(
         color: AppTheme.surface,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -296,7 +380,52 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
                 itemCount: widget.messages.length,
                 itemBuilder: (context, i) {
                   final m = widget.messages[i];
-                  return _Bubble(msg: m);
+                  final isHost = m.isHost;
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        CircleAvatar(
+                          radius: 14,
+                          backgroundColor:
+                          isHost ? AppTheme.primary : AppTheme.surfaceVariant,
+                          child: Text(
+                            m.from.characters.first.toUpperCase(),
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: isHost
+                                  ? AppTheme.surfaceVariant
+                                  : AppTheme.surface,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  m.from,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    color: isHost
+                                        ? AppTheme.textPrimary
+                                        : AppTheme.textSecondary,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(m.text),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
                 },
               ),
             ),
@@ -305,57 +434,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
             ChatComposer(onSend: _handleSend),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _Bubble extends StatelessWidget {
-  final Message msg;
-  const _Bubble({required this.msg});
-
-  @override
-  Widget build(BuildContext context) {
-    final isHost = msg.isHost;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          CircleAvatar(
-            radius: 14,
-            backgroundColor:
-            isHost ? AppTheme.primary : AppTheme.surfaceVariant,
-            child: Text(
-              msg.from.characters.first.toUpperCase(),
-              style: const TextStyle(fontSize: 12),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: isHost ? AppTheme.surfaceVariant : AppTheme.surface,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(msg.from,
-                      style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: isHost
-                            ? AppTheme.textPrimary
-                            : AppTheme.textSecondary,
-                      )),
-                  const SizedBox(height: 4),
-                  Text(msg.text),
-                ],
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
