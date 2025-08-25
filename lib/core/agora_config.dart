@@ -3,7 +3,7 @@ const String agoraAppId = 'f1e2d0360c8042fb851d6ca517402c42';
 
 // For quick testing you can use a temporary token generated in the console.
 // If your project has NO certificate enabled, you can set this to '' (empty).
-const String agoraTempToken = '007eJxTYNBc5HAkvWHLhYLPP3vjL56axPRmWdhcY8FLB5s5wj6s5dqjwJBmmGqUYmBsZpBsYWBilJZkYWqYYpacaGpobmJglGxixM25JqMhkJFh9pYeJkYGCATxeRhyMstS8zIr4ktSi0sYGADV4SO1';
+const String agoraTempToken = '007eJxTYDD/xLFPbu0K2avhurI6awp825NnBXB8d9wwY8Hzi6KdxmEKDGmGqUYpBsZmBskWBiZGaUkWpoYpZsmJpobmJgZGySZGBxXXZDQEMjLUXVNlYIRCEJ+HISezLDUvsyK+JLW4hIEBANPnITM=';
 
 // Only used if you test without a room object:
 const String defaultTestChannel = 'livenix_test';

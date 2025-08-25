@@ -1,7 +1,7 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../data/live_registry.dart';
 import '../../data/models/live_room.dart';
 import '../../theme/theme.dart';
 import '../../widgets/live_badge.dart';
@@ -14,158 +14,161 @@ class LivesListScreen extends StatefulWidget {
 }
 
 class _LivesListScreenState extends State<LivesListScreen> {
-  final searchCtrl = TextEditingController();
-  late List<LiveRoom> all;
-  late List<LiveRoom> filtered;
-
-  @override
-  void initState() {
-    super.initState();
-    all = _dummyRooms();
-    filtered = List.from(all);
-    searchCtrl.addListener(_applyFilter);
-  }
+  final _searchCtrl = TextEditingController();
+  String _query = '';
 
   @override
   void dispose() {
-    searchCtrl.dispose();
+    _searchCtrl.dispose();
     super.dispose();
-  }
-
-  void _applyFilter() {
-    final q = searchCtrl.text.toLowerCase().trim();
-    setState(() {
-      filtered = all.where((r) {
-        return r.title.toLowerCase().contains(q) ||
-            r.hostName.toLowerCase().contains(q) ||
-            r.id.toLowerCase().contains(q);
-      }).toList();
-    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Explore Lives')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            TextField(
-              controller: searchCtrl,
+      appBar: AppBar(title: const Text('Live Streams')),
+      body: Column(
+        children: [
+          // search
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: TextField(
+              controller: _searchCtrl,
+              onChanged: (v) => setState(() => _query = v.trim().toLowerCase()),
               decoration: const InputDecoration(
-                hintText: 'Search by title, host, or room ID…',
+                hintText: 'Search by title or Room ID',
                 prefixIcon: Icon(Icons.search),
               ),
             ),
-            const SizedBox(height: 16),
-            Expanded(
-              child: ListView.separated(
-                itemCount: filtered.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 12),
-                itemBuilder: (context, i) {
-                  final room = filtered[i];
-                  return _LiveCard(
-                    room: room,
-                    onWatch: () => context.push('/lives/${room.id}', extra: room),
+          ),
+
+          // live list
+          Expanded(
+            child: ValueListenableBuilder<List<LiveRoom>>(
+              valueListenable: LiveRegistry.instance.lives,
+              builder: (context, rooms, _) {
+                // only rooms that are live, and match search
+                final filtered = rooms.where((r) {
+                  if (!(r.isLive ?? true)) return false;
+                  if (_query.isEmpty) return true;
+                  final t = (r.title ?? '').toLowerCase();
+                  return t.contains(_query) || (r.id ?? '').toLowerCase().contains(_query);
+                }).toList()
+                  ..sort((a, b) => (b.viewersCount ?? 0).compareTo(a.viewersCount ?? 0));
+
+                if (filtered.isEmpty) {
+                  return const Center(
+                    child: Text('No live streams right now'),
                   );
-                },
-              ),
+                }
+
+                return ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                  itemCount: filtered.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 12),
+                  itemBuilder: (context, i) {
+                    final room = filtered[i];
+                    return _LiveCard(room: room);
+                  },
+                );
+              },
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
-  }
-
-  List<LiveRoom> _dummyRooms() {
-    final rnd = Random();
-    return List.generate(8, (i) {
-      final id = (100000 + rnd.nextInt(899999)).toString();
-      return LiveRoom(
-        id: id,
-        title: 'Kohat Live #$i',
-        hostName: 'Host $i',
-        viewersCount: 5 + rnd.nextInt(200),
-        isLive: true,
-      );
-    });
   }
 }
 
 class _LiveCard extends StatelessWidget {
   final LiveRoom room;
-  final VoidCallback onWatch;
-
-  const _LiveCard({required this.room, required this.onWatch});
+  const _LiveCard({required this.room});
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: onWatch,
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            children: [
-              // Thumbnail placeholder
-              Container(
-                width: 120,
-                height: 72,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
-                  gradient: AppTheme.primaryGradient,
-                ),
-                child: const Icon(Icons.play_circle_outline, size: 36),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    return InkWell(
+      onTap: () => context.push('/lives/${room.id}', extra: room),
+      borderRadius: BorderRadius.circular(16),
+      child: Ink(
+        decoration: BoxDecoration(
+          color: AppTheme.surface,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // thumbnail area
+            ClipRRect(
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+              child: SizedBox(
+                height: 160,
+                child: Stack(
                   children: [
-                    Row(
-                      children: [
-                        LiveBadge(isLive: room.isLive),
-                        const SizedBox(width: 8),
-                        Icon(Icons.remove_red_eye_outlined,
-                            size: 16, color: AppTheme.textSecondary),
-                        const SizedBox(width: 4),
-                        Text('${room.viewersCount}',
-                            style: const TextStyle(
-                                color: AppTheme.textSecondary, fontSize: 12)),
-                      ],
+                    Positioned.fill(
+                      child: Container(decoration: BoxDecoration(gradient: AppTheme.primaryGradient)),
                     ),
-                    const SizedBox(height: 6),
-                    Text(room.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700, fontSize: 16)),
-                    const SizedBox(height: 4),
-                    Text('by ${room.hostName}',
-                        style: const TextStyle(color: AppTheme.textSecondary)),
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: OutlinedButton.icon(
-                        onPressed: onWatch,
-                        icon: const Icon(Icons.live_tv_outlined),
-                        label: const Text('Watch Now'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          side: const BorderSide(color: AppTheme.surfaceVariant),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                    Positioned(left: 12, top: 12, child: LiveBadge(isLive: room.isLive ?? true)),
+                    Positioned(
+                      right: 12,
+                      top: 12,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.35),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.remove_red_eye_outlined, size: 16, color: Colors.white),
+                            const SizedBox(width: 6),
+                            Text(
+                              '${room.viewersCount ?? 0}',
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                            ),
+                          ],
                         ),
                       ),
                     ),
                   ],
                 ),
-              )
-            ],
-          ),
+              ),
+            ),
+            // meta + button
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(room.title ?? 'Untitled',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 4),
+                        Text(room.hostName ?? '—',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: AppTheme.textSecondary)),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    onPressed: () => context.push('/lives/${room.id}', extra: room),
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Watch Now'),
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(10, 42),
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

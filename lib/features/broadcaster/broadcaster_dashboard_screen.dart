@@ -5,6 +5,7 @@ import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 
 import '../../core/agora_config.dart';
 import '../../services/agora_service.dart';
+import '../../data/live_registry.dart';            // <-- ADDED (Step 2)
 import '../../data/models/live_room.dart';
 import '../../data/models/message.dart';
 import '../../theme/theme.dart';
@@ -49,9 +50,10 @@ class _BroadcasterDashboardScreenState
 
   @override
   void dispose() {
-    // make sure we leave the channel if user navigates away while live
+    // --- Step 5: safety cleanup if user leaves while live
     if (isLive) {
       _agora.leave();
+      LiveRegistry.instance.end(widget.room?.id ?? defaultTestChannel);
     }
     super.dispose();
   }
@@ -79,11 +81,24 @@ class _BroadcasterDashboardScreenState
       );
       setState(() => isLive = true);
 
+      // --- Step 3: show this room in the Lives list
+      LiveRegistry.instance.upsert(
+        LiveRoom(
+          id: widget.room?.id ?? defaultTestChannel,
+          title: widget.room?.title ?? 'My Live',
+          hostName: widget.room?.hostName ?? 'Broadcaster',
+          isLive: true,
+          viewersCount: 0,
+        ),
+      );
+
       // apply current UI toggles to engine
       await _agora.setMicOn(micOn);
       await _agora.setCameraOn(camOn);
     } else {
+      // --- Step 4: remove from list when stopping
       await _agora.leave();
+      LiveRegistry.instance.end(widget.room?.id ?? defaultTestChannel);
       setState(() => isLive = false);
     }
   }
@@ -274,8 +289,10 @@ class _BroadcasterDashboardScreenState
                 ),
               ),
               onPressed: () async {
+                // --- Step 4: also remove from list here when ending via button
                 if (isLive) {
                   await _agora.leave();
+                  LiveRegistry.instance.end(widget.room?.id ?? defaultTestChannel);
                   setState(() => isLive = false);
                 }
                 context.pop(); // back to previous screen
