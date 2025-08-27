@@ -23,8 +23,11 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
   late List<Message> messages;
   bool muted = false;
 
-  int? _hostUid;            // first remote we detect (host)
+  int? _hostUid; // first remote we detect (host)
   late final String _channelId;
+
+  // keep reference to remove listener in dispose
+  VoidCallback? _uidsListenerCancel;
 
   @override
   void initState() {
@@ -47,20 +50,29 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
     _agora.joinAsAudience(channelId: _channelId, token: agoraTempToken);
 
     // Track remote user(s) and display the first one (host)
-    _agora.remoteUids.addListener(() {
+    void uidsListener() {
       if (!mounted) return;
+      final list = _agora.remoteUids.value;
       setState(() {
-        _hostUid = _agora.remoteUids.value.isEmpty
-            ? null
-            : _agora.remoteUids.value.first;
+        _hostUid = list.isEmpty ? null : list.first;
       });
-    });
+    }
+
+    _agora.remoteUids.addListener(uidsListener);
+    _uidsListenerCancel = () => _agora.remoteUids.removeListener(uidsListener);
   }
 
   @override
   void dispose() {
+    _uidsListenerCancel?.call();
     _agora.leave(); // leave channel when exiting viewer
     super.dispose();
+  }
+
+  Future<bool> _onWillPop() async {
+    // ensure we leave cleanly if user presses back
+    await _agora.leave();
+    return true;
   }
 
   void _send(String text) {
@@ -80,87 +92,97 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
   @override
   Widget build(BuildContext context) {
     final room = widget.room;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(room?.title ?? 'Live Stream'),
-        actions: [
-          IconButton(
-            onPressed: () async {
-              setState(() => muted = !muted);
-              // Mute/unmute remote playback audio (0 = mute, 100 = normal)
-              await _agora.engine.adjustPlaybackSignalVolume(muted ? 0 : 100);
-            },
-            icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // Video stage (remote view if available)
-          AspectRatio(
-            aspectRatio: 16 / 9,
-            child: Stack(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.zero,
-                  child: (_hostUid != null)
-                      ? AgoraVideoView(
-                    controller: VideoViewController.remote(
-                      rtcEngine: _agora.engine,
-                      canvas: VideoCanvas(uid: _hostUid!),
-                      connection: RtcConnection(
-                        channelId: _agora.currentChannelId ?? _channelId,
+    return WillPopScope(
+      onWillPop: _onWillPop,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(room?.title ?? 'Live Stream'),
+          actions: [
+            IconButton(
+              onPressed: () async {
+                setState(() => muted = !muted);
+                // Mute/unmute remote playback audio (0 = mute, 100 = normal)
+                await _agora.engine
+                    .adjustPlaybackSignalVolume(muted ? 0 : 100);
+              },
+              icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
+              tooltip: muted ? 'Unmute' : 'Mute',
+            ),
+          ],
+        ),
+        body: Column(
+          children: [
+            // Video stage (remote view if available)
+            AspectRatio(
+              aspectRatio: 16 / 9,
+              child: Stack(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.zero,
+                    child: (_hostUid != null)
+                        ? AgoraVideoView(
+                      controller: VideoViewController.remote(
+                        rtcEngine: _agora.engine,
+                        canvas: VideoCanvas(uid: _hostUid!),
+                        connection: RtcConnection(
+                          channelId:
+                          _agora.currentChannelId ?? _channelId,
+                        ),
+                      ),
+                    )
+                        : Container(
+                      decoration: BoxDecoration(
+                        gradient: AppTheme.primaryGradient,
+                      ),
+                      child: const Center(
+                        child: Icon(Icons.live_tv_outlined, size: 64),
                       ),
                     ),
-                  )
-                      : Container(
-                    decoration: BoxDecoration(
-                      gradient: AppTheme.primaryGradient,
-                    ),
-                    child: const Center(
-                      child: Icon(Icons.live_tv_outlined, size: 64),
+                  ),
+                  Positioned(
+                    left: 12,
+                    top: 12,
+                    child: LiveBadge(isLive: room?.isLive ?? true),
+                  ),
+                  Positioned(
+                    right: 12,
+                    top: 12,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: AppTheme.surface,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.remove_red_eye_outlined, size: 16),
+                          const SizedBox(width: 6),
+                          Text('${room?.viewersCount ?? 128}'),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                Positioned(
-                  left: 12,
-                  top: 12,
-                  child: LiveBadge(isLive: room?.isLive ?? true),
-                ),
-                Positioned(
-                  right: 12,
-                  top: 12,
-                  child: Container(
-                    padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: AppTheme.surface,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.remove_red_eye_outlined, size: 16),
-                        const SizedBox(width: 6),
-                        Text('${room?.viewersCount ?? 128}'),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: messages.length,
-              itemBuilder: (context, i) {
-                final m = messages[i];
-                return _ChatBubble(msg: m);
-              },
+
+            // Chat list
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.all(12),
+                itemCount: messages.length,
+                itemBuilder: (context, i) {
+                  final m = messages[i];
+                  return _ChatBubble(msg: m);
+                },
+              ),
             ),
-          ),
-          ChatComposer(onSend: _send),
-        ],
+
+            // Composer
+            ChatComposer(onSend: _send),
+          ],
+        ),
       ),
     );
   }
@@ -198,13 +220,14 @@ class _ChatBubble extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(msg.from,
-                      style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: isHost
-                            ? AppTheme.textPrimary
-                            : AppTheme.textSecondary,
-                      )),
+                  Text(
+                    msg.from,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color:
+                      isHost ? AppTheme.textPrimary : AppTheme.textSecondary,
+                    ),
+                  ),
                   const SizedBox(height: 4),
                   Text(msg.text),
                 ],

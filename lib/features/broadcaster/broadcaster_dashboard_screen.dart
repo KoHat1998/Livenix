@@ -5,7 +5,7 @@ import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 
 import '../../core/agora_config.dart';
 import '../../services/agora_service.dart';
-import '../../data/live_registry.dart';            // <-- ADDED (Step 2)
+import '../../data/live_registry.dart';
 import '../../data/models/live_room.dart';
 import '../../data/models/message.dart';
 import '../../theme/theme.dart';
@@ -50,55 +50,68 @@ class _BroadcasterDashboardScreenState
 
   @override
   void dispose() {
-    // --- Step 5: safety cleanup if user leaves while live
+    // Safety cleanup if user leaves while live
     if (isLive) {
+      final channel = widget.room?.id ?? defaultTestChannel;
       _agora.leave();
-      LiveRegistry.instance.end(widget.room?.id ?? defaultTestChannel);
+      LiveRegistry.instance.end(channel);
     }
     super.dispose();
   }
 
   Future<void> _goLiveToggle() async {
     if (!isLive) {
-      // Request permissions first
+      // Request permissions
       final statuses =
       await [Permission.camera, Permission.microphone].request();
       final camOk = statuses[Permission.camera]?.isGranted ?? false;
       final micOk = statuses[Permission.microphone]?.isGranted ?? false;
       if (!camOk || !micOk) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Camera/Mic permission required')),
-          );
-        }
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Camera/Mic permission required')),
+        );
         return;
       }
 
       final channel = widget.room?.id ?? defaultTestChannel;
-      await _agora.joinAsBroadcaster(
-        channelId: channel,
-        token: agoraTempToken, // empty is OK if your Agora project has no cert
-      );
-      setState(() => isLive = true);
 
-      // --- Step 3: show this room in the Lives list
-      LiveRegistry.instance.upsert(
-        LiveRoom(
-          id: widget.room?.id ?? defaultTestChannel,
+      try {
+        await _agora.joinAsBroadcaster(
+          channelId: channel,
+          token: agoraTempToken, // can be empty if App Certificate disabled
+        );
+
+        if (!mounted) return;
+        setState(() => isLive = true);
+
+        // Publish this room to the in-memory live list (local)
+        final liveRoom = LiveRoom(
+          id: channel,
           title: widget.room?.title ?? 'My Live',
           hostName: widget.room?.hostName ?? 'Broadcaster',
           isLive: true,
           viewersCount: 0,
-        ),
-      );
+        );
+        LiveRegistry.instance.upsert(liveRoom);
 
-      // apply current UI toggles to engine
-      await _agora.setMicOn(micOn);
-      await _agora.setCameraOn(camOn);
+        // Publish to RTM directory (cross-device)
+
+        // Apply current UI toggles to engine
+        await _agora.setMicOn(micOn);
+        await _agora.setCameraOn(camOn);
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to start live: $e')),
+        );
+      }
     } else {
-      // --- Step 4: remove from list when stopping
+      // Stop live
+      final channel = widget.room?.id ?? defaultTestChannel;
       await _agora.leave();
-      LiveRegistry.instance.end(widget.room?.id ?? defaultTestChannel);
+      LiveRegistry.instance.end(channel);
+      if (!mounted) return;
       setState(() => isLive = false);
     }
   }
@@ -134,7 +147,9 @@ class _BroadcasterDashboardScreenState
           },
         );
       },
-    ).then((_) => setState(() {})); // refresh after closing
+    ).then((_) {
+      if (mounted) setState(() {}); // refresh after closing
+    });
   }
 
   @override
@@ -252,8 +267,10 @@ class _BroadcasterDashboardScreenState
                   label: 'Switch Camera',
                   onTap: () async {
                     if (!isLive) {
+                      if (!mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Go live to switch camera')),
+                        const SnackBar(
+                            content: Text('Go live to switch camera')),
                       );
                       return;
                     }
@@ -289,13 +306,16 @@ class _BroadcasterDashboardScreenState
                 ),
               ),
               onPressed: () async {
-                // --- Step 4: also remove from list here when ending via button
+                // Also remove from list here when ending via button
                 if (isLive) {
+                  final channel = widget.room?.id ?? defaultTestChannel;
                   await _agora.leave();
-                  LiveRegistry.instance.end(widget.room?.id ?? defaultTestChannel);
-                  setState(() => isLive = false);
+                  LiveRegistry.instance.end(channel);
+                  if (mounted) {
+                    setState(() => isLive = false);
+                  }
                 }
-                context.pop(); // back to previous screen
+                if (mounted) context.pop(); // back to previous screen
               },
               icon: const Icon(Icons.stop_circle_outlined),
               label: const Text('End Stream'),
@@ -448,6 +468,7 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
             ),
 
             // composer
+            // ignore: avoid_redundant_argument_values
             ChatComposer(onSend: _handleSend),
           ],
         ),

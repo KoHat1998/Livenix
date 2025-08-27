@@ -23,10 +23,62 @@ class _LivesListScreenState extends State<LivesListScreen> {
     super.dispose();
   }
 
+  Future<void> _joinByRoomId() async {
+    final ctrl = TextEditingController();
+    final id = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Join by Room ID'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            textInputAction: TextInputAction.done,
+            decoration: const InputDecoration(
+              hintText: 'Enter channel / room id, e.g. livenix_test',
+            ),
+            onSubmitted: (_) => Navigator.of(context).pop(ctrl.text.trim()),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(ctrl.text.trim()),
+              child: const Text('Join'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (id == null || id.isEmpty) return;
+
+    // Optional: add a temporary card so this device shows it in the list.
+    LiveRegistry.instance.upsert(
+      LiveRoom(
+        id: id,
+        title: 'Live: $id',
+        hostName: '—',
+        isLive: true,
+        viewersCount: 0,
+      ),
+    );
+
+    if (!mounted) return;
+    context.push('/lives/$id', extra: LiveRoom(id: id, title: 'Live: $id', hostName: '—', isLive: true));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Live Streams')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _joinByRoomId,
+        icon: const Icon(Icons.link),
+        label: const Text('Join by Room ID'),
+      ),
       body: Column(
         children: [
           // search
@@ -35,9 +87,19 @@ class _LivesListScreenState extends State<LivesListScreen> {
             child: TextField(
               controller: _searchCtrl,
               onChanged: (v) => setState(() => _query = v.trim().toLowerCase()),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 hintText: 'Search by title or Room ID',
-                prefixIcon: Icon(Icons.search),
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                  tooltip: 'Clear',
+                  onPressed: () {
+                    _searchCtrl.clear();
+                    setState(() => _query = '');
+                  },
+                  icon: const Icon(Icons.close_rounded),
+                ),
               ),
             ),
           ),
@@ -47,14 +109,17 @@ class _LivesListScreenState extends State<LivesListScreen> {
             child: ValueListenableBuilder<List<LiveRoom>>(
               valueListenable: LiveRegistry.instance.lives,
               builder: (context, rooms, _) {
-                // only rooms that are live, and match search
-                final filtered = rooms.where((r) {
-                  if (!(r.isLive ?? true)) return false;
+                final filtered = rooms
+                    .where((r) {
+                  if (!(r.isLive)) return false;
                   if (_query.isEmpty) return true;
-                  final t = (r.title ?? '').toLowerCase();
-                  return t.contains(_query) || (r.id ?? '').toLowerCase().contains(_query);
-                }).toList()
-                  ..sort((a, b) => (b.viewersCount ?? 0).compareTo(a.viewersCount ?? 0));
+                  final t = (r.title).toLowerCase();
+                  final id = (r.id).toLowerCase();
+                  return t.contains(_query) || id.contains(_query);
+                })
+                    .toList()
+                  ..sort((a, b) =>
+                      (b.viewersCount).compareTo(a.viewersCount));
 
                 if (filtered.isEmpty) {
                   return const Center(
@@ -99,31 +164,47 @@ class _LiveCard extends StatelessWidget {
           children: [
             // thumbnail area
             ClipRRect(
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+              borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(16)),
               child: SizedBox(
                 height: 160,
                 child: Stack(
                   children: [
                     Positioned.fill(
-                      child: Container(decoration: BoxDecoration(gradient: AppTheme.primaryGradient)),
+                      child: Container(
+                        decoration:
+                        BoxDecoration(gradient: AppTheme.primaryGradient),
+                      ),
                     ),
-                    Positioned(left: 12, top: 12, child: LiveBadge(isLive: room.isLive ?? true)),
+                    const Positioned(
+                      left: 12,
+                      top: 12,
+                      child: LiveBadge(isLive: true),
+                    ),
                     Positioned(
                       right: 12,
                       top: 12,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
                         decoration: BoxDecoration(
                           color: Colors.black.withOpacity(0.35),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.remove_red_eye_outlined, size: 16, color: Colors.white),
+                            const Icon(
+                              Icons.remove_red_eye_outlined,
+                              size: 16,
+                              color: Colors.white,
+                            ),
                             const SizedBox(width: 6),
                             Text(
-                              '${room.viewersCount ?? 0}',
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                              '${room.viewersCount}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ],
                         ),
@@ -142,27 +223,38 @@ class _LiveCard extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(room.title ?? 'Untitled',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                        Text(
+                          room.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
                         const SizedBox(height: 4),
-                        Text(room.hostName ?? '—',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: AppTheme.textSecondary)),
+                        Text(
+                          room.hostName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style:
+                          const TextStyle(color: AppTheme.textSecondary),
+                        ),
                       ],
                     ),
                   ),
                   const SizedBox(width: 12),
                   ElevatedButton.icon(
-                    onPressed: () => context.push('/lives/${room.id}', extra: room),
+                    onPressed: () =>
+                        context.push('/lives/${room.id}', extra: room),
                     icon: const Icon(Icons.play_arrow),
                     label: const Text('Watch Now'),
                     style: ElevatedButton.styleFrom(
                       minimumSize: const Size(10, 42),
                       padding: const EdgeInsets.symmetric(horizontal: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                     ),
                   ),
                 ],
