@@ -27,21 +27,16 @@ class _BroadcasterDashboardScreenState
     extends State<BroadcasterDashboardScreen> {
   final _media = MediaService.instance;
   final _live = LiveService.instance;
-
-  // Signaling helper
   final _signal = SignalService.instance;
 
-  // WebRTC state
   RTCPeerConnection? _pc;
   String? _roomId;
   String? _userId;
 
-  // UI state
   bool isLive = false;
   bool micOn = true;
   bool camOn = true;
 
-  // demo chat
   late List<Message> messages;
 
   @override
@@ -61,28 +56,32 @@ class _BroadcasterDashboardScreenState
 
   @override
   void dispose() {
-    // Best-effort cleanup if user leaves while live
-    () async {
-      try {
-        await _media.leave();
-      } catch (_) {}
-      try {
-        if (_roomId != null) {
-          await _live.endLive(_roomId!);
-          await _signal.close(_roomId!);
-        }
-      } catch (_) {}
-      try {
-        await _pc?.close();
+    // fire-and-forget cleanup
+    _stopLive();
+    super.dispose();
+  }
+
+  Future<void> _stopLive() async {
+    try {
+      await _media.leave();
+    } catch (_) {}
+    try {
+      final id = _roomId ?? widget.room?.id;
+      if (id != null) {
+        await _live.endLive(id);
+        await _signal.close(id);
+      }
+    } catch (_) {}
+    try {
+      await _pc?.close();
     } catch (_) {}
     _pc = null;
-    }();
-    super.dispose();
+    if (mounted) setState(() => isLive = false);
   }
 
   Future<void> _goLiveToggle() async {
     if (!isLive) {
-      // 1) Ask permissions
+      // 1) Permissions
       final statuses =
       await [Permission.camera, Permission.microphone].request();
       final camOk = statuses[Permission.camera]?.isGranted ?? false;
@@ -95,7 +94,7 @@ class _BroadcasterDashboardScreenState
         return;
       }
 
-      // 2) Require auth
+      // 2) Auth
       final userId = Supabase.instance.client.auth.currentUser?.id;
       if (userId == null) {
         if (!mounted) return;
@@ -105,22 +104,25 @@ class _BroadcasterDashboardScreenState
         return;
       }
 
-      // 3) Pick room id for this live
+      // 3) Resolve IDs
       final channel = widget.room?.id ?? 'test-room';
       _roomId = channel;
       _userId = userId;
 
       try {
-        // 4) Start local capture (preview)
+        // 4) Local preview capture
         await _media.joinAsBroadcaster();
 
-        // 5) Create PeerConnection + add local tracks
+        // 5) Create PeerConnection w/ local tracks
         _pc = await _media.newPeerConnection(addLocalTracks: true);
 
-        // 6) Trickle ICE to Supabase
+        // 6) Trickle our ICE to signaling
         _pc!.onIceCandidate = (candidate) async {
-          if (_roomId == null || _userId == null) return;
-          if (candidate.candidate == null) return;
+          if (candidate.candidate == null ||
+              _roomId == null ||
+              _userId == null) {
+            return;
+          }
           await _signal.sendIce(
             _roomId!,
             candidate: {
@@ -132,14 +134,49 @@ class _BroadcasterDashboardScreenState
           );
         };
 
-        // 7) Open signaling channel
+        // 7) Open channel & register listeners BEFORE sending offer
         await _signal.open(channel);
 
-        // 8) Create and set local SDP offer
+        // Answer listener (first answer wins)
+        _signal.listenAnswers(channel, onData: (data) async {
+          try {
+            final sdp = data['sdp'] as String?;
+            final pc = _pc;
+            if (sdp == null || pc == null) return;
+            final current = await pc.getRemoteDescription();
+            if (current == null) {
+              await pc.setRemoteDescription(
+                RTCSessionDescription(sdp, 'answer'),
+              );
+              debugPrint('[SIGNAL] Remote ANSWER set');
+            }
+          } catch (e) {
+            debugPrint('[SIGNAL] setRemoteDescription(answer) error: $e');
+          }
+        });
+
+        // ICE from viewers
+        _signal.listenIce(channel, onData: (data) async {
+          try {
+            final pc = _pc;
+            if (pc == null) return;
+            final cand = Map<String, dynamic>.from(data['candidate'] as Map);
+            final ice = RTCIceCandidate(
+              cand['candidate'] as String?,
+              cand['sdpMid'] as String?,
+              (cand['sdpMLineIndex'] as num?)?.toInt(),
+            );
+            await pc.addCandidate(ice);
+          } catch (e) {
+            debugPrint('[SIGNAL] addCandidate error: $e');
+          }
+        });
+
+        // 8) Create & set local SDP offer
         final offer = await _pc!.createOffer();
         await _pc!.setLocalDescription(offer);
 
-        // 9) Publish to DB so this live appears in listings
+        // 9) Publish to DB so viewers can see it
         final liveRoom = LiveRoom(
           id: channel,
           title: widget.room?.title ?? 'My Live',
@@ -148,49 +185,18 @@ class _BroadcasterDashboardScreenState
           isLive: true,
           status: 'live',
           hostUserId: userId,
-          thumbnailUrl: null, // optional; you can upload a frame later
+          thumbnailUrl: null,
           startedAt: DateTime.now(),
         );
         await _live.startLive(liveRoom);
 
-        // 10) Send the offer to viewers via Supabase
+        // 10) Send the offer
         await _signal.sendOffer(channel, sdp: offer.sdp!, from: userId);
-
-        // 11) Listen for ANSWER + remote ICE from viewers
-        _signal.listenAnswers(channel, onData: (data) async {
-          final sdp = data['sdp'] as String?;
-          if (sdp == null || _pc == null) return;
-          final current = await _pc!.getRemoteDescription();
-          if (current == null) {
-            await _pc!.setRemoteDescription(
-              RTCSessionDescription(sdp, 'answer'),
-            );
-            debugPrint('[SIGNAL] Remote ANSWER set');
-          }
-        });
-
-        _signal.listenIce(channel, onData: (data) async {
-          if (_pc == null) return;
-          final cand = Map<String, dynamic>.from(
-            data['candidate'] as Map,
-          );
-          final ice = RTCIceCandidate(
-            cand['candidate'] as String?,
-            cand['sdpMid'] as String?,
-            (cand['sdpMLineIndex'] as num?)?.toInt(),
-          );
-          try {
-            await _pc!.addCandidate(ice);
-            debugPrint('[SIGNAL] Remote ICE added');
-          } catch (e) {
-            debugPrint('[SIGNAL] addCandidate error: $e');
-          }
-        });
 
         if (!mounted) return;
         setState(() => isLive = true);
 
-        // Apply UI toggles
+        // 11) Apply mic/cam toggles
         await _media.setMicOn(micOn);
         await _media.setCameraOn(camOn);
       } catch (e) {
@@ -200,20 +206,7 @@ class _BroadcasterDashboardScreenState
         );
       }
     } else {
-      // ==== STOP LIVE ====
-      try {
-        await _media.leave();
-        final id = _roomId ?? widget.room?.id ?? 'test-room';
-        await _live.endLive(id);
-        await _signal.close(id);
-        await _pc?.close();
-        _pc = null;
-      } catch (e) {
-        // ignore
-      } finally {
-        if (!mounted) return;
-        setState(() => isLive = false);
-      }
+      await _stopLive();
     }
   }
 
@@ -262,7 +255,6 @@ class _BroadcasterDashboardScreenState
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
-            // Live preview
             AspectRatio(
               aspectRatio: 16 / 9,
               child: ClipRRect(
@@ -323,7 +315,6 @@ class _BroadcasterDashboardScreenState
             ),
             const SizedBox(height: 16),
 
-            // Controls
             GridView.count(
               crossAxisCount: 2,
               shrinkWrap: true,
@@ -385,7 +376,6 @@ class _BroadcasterDashboardScreenState
             ),
             const SizedBox(height: 16),
 
-            // End Stream
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppTheme.danger,
@@ -397,15 +387,7 @@ class _BroadcasterDashboardScreenState
               ),
               onPressed: () async {
                 if (isLive) {
-                  try {
-                    await _media.leave();
-                    final id = _roomId ?? widget.room?.id ?? 'test-room';
-                    await _live.endLive(id);
-                    await _signal.close(id);
-                    await _pc?.close();
-                    _pc = null;
-                  } catch (_) {}
-                  if (mounted) setState(() => isLive = false);
+                  await _stopLive();
                 }
                 if (mounted) context.pop();
               },
@@ -440,7 +422,7 @@ class _ChatBottomSheet extends StatefulWidget {
 class _ChatBottomSheetState extends State<_ChatBottomSheet> {
   void _handleSend(String text) {
     widget.onSend(text);
-    setState(() {}); // refresh list
+    setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (widget.scrollController.hasClients) {
         widget.scrollController.animateTo(
@@ -497,7 +479,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
               ),
             ),
             const Divider(height: 1, color: AppTheme.surfaceVariant),
-
             Expanded(
               child: ListView.builder(
                 controller: widget.scrollController,
@@ -513,9 +494,8 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
                       children: [
                         CircleAvatar(
                           radius: 14,
-                          backgroundColor: isHost
-                              ? AppTheme.primary
-                              : AppTheme.surfaceVariant,
+                          backgroundColor:
+                          isHost ? AppTheme.primary : AppTheme.surfaceVariant,
                           child: Text(
                             m.from.characters.first.toUpperCase(),
                             style: const TextStyle(fontSize: 12),
@@ -555,7 +535,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
                 },
               ),
             ),
-
             ChatComposer(onSend: _handleSend),
           ],
         ),
