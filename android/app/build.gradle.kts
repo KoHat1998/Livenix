@@ -16,7 +16,7 @@ android {
         applicationId = "com.example.livenix"
 
         // Flutter now requires minSdk >= 23
-        minSdkVersion(23)
+        minSdkVersion(24)
         targetSdkVersion(36)
 
         // Read version from local.properties if present, else default

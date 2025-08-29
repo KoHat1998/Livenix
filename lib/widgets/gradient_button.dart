@@ -4,13 +4,13 @@ import '../theme/theme.dart';
 class GradientButton extends StatelessWidget {
   final String label;
   final IconData? icon;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed; // <-- make nullable
   final double height;
 
   const GradientButton({
     super.key,
     required this.label,
-    required this.onPressed,
+    this.onPressed,          // <-- can be null
     this.icon,
     this.height = 56,
   });
@@ -30,10 +30,11 @@ class GradientButton extends StatelessWidget {
             backgroundColor: Colors.transparent,
             shadowColor: Colors.transparent,
             foregroundColor: Colors.white,
-            shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
           ),
-          onPressed: onPressed,
+          onPressed: onPressed, // null disables the button automatically
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -43,8 +44,10 @@ class GradientButton extends StatelessWidget {
               ],
               Text(
                 label,
-                style:
-                const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ],
           ),

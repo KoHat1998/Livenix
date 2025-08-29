@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../core/router_refresh.dart'; // add this
+
 
 import '../features/splash/splash_screen.dart';
 import '../features/home/home_screen.dart';
@@ -11,8 +14,13 @@ import '../features/auth/signin_screen.dart';
 import '../features/auth/signup_screen.dart';
 import '../data/models/live_room.dart';
 
+bool _isAuthRoute(String path) =>
+    path.startsWith('/auth') || path == '/auth' || path == '/auth/';
+
 final appRouter = GoRouter(
+  // Show splash first; redirect below will move to sign-in or home automatically
   initialLocation: '/splash',
+
   routes: [
     GoRoute(
       path: '/splash',
@@ -53,11 +61,42 @@ final appRouter = GoRouter(
       },
     ),
   ],
+
+  // 🔐 Auth-aware redirects
   redirect: (context, state) {
-    // Keep old links working: /auth -> /auth/signin
+    // Keep old links working
     if (state.uri.toString() == '/auth') return '/auth/signin';
+
+    final session = Supabase.instance.client.auth.currentSession;
+    final loggingIn = _isAuthRoute(state.matchedLocation);
+    final atSplash = state.matchedLocation == '/splash';
+
+    // Not logged in → only allow auth routes (or splash which will bounce to signin)
+    if (session == null) {
+      if (loggingIn) return null;
+      if (atSplash) return '/auth/signin';
+      return '/auth/signin';
+    }
+
+    // Logged in → block auth routes, send to home (or keep their target)
+    if (session != null && loggingIn) {
+      return '/home';
+    }
+
+    // Example protection: require auth for broadcaster routes
+    if (session == null &&
+        (state.matchedLocation.startsWith('/broadcast'))) {
+      return '/auth/signin';
+    }
+
     return null;
   },
+
+  // 🔄 Re-run redirects automatically on login/logout/refresh
+  refreshListenable: GoRouterRefreshStream(
+    Supabase.instance.client.auth.onAuthStateChange,
+  ),
+
   errorBuilder: (context, state) => Scaffold(
     body: Center(child: Text('Route error: ${state.error}')),
   ),

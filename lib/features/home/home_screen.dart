@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../theme/theme.dart';
 import '../../widgets/gradient_button.dart';
 
@@ -8,8 +9,22 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final user = Supabase.instance.client.auth.currentUser;
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Livenix')),
+      appBar: AppBar(
+        title: const Text('Livenix'),
+        actions: [
+          IconButton(
+            tooltip: 'Log out',
+            icon: const Icon(Icons.logout),
+            onPressed: () async {
+              await Supabase.instance.client.auth.signOut();
+              // router redirect will automatically send back to /auth/signin
+            },
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
@@ -19,7 +34,25 @@ class HomeScreen extends StatelessWidget {
               'LiveStream Hub',
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 8),
+
+            // small signed-in banner
+            if (user != null) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: AppTheme.surfaceVariant,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  'Signed in as: ${user.email ?? user.id}',
+                  style: const TextStyle(fontSize: 14),
+                ),
+              ),
+              const SizedBox(height: 24),
+            ],
+
             Expanded(
               child: Center(
                 child: ConstrainedBox(

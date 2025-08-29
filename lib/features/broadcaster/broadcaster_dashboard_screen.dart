@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-import '../../core/agora_config.dart';
-import '../../services/agora_service.dart';
-import '../../data/live_registry.dart';
+import '../../services/media_service.dart';
+import '../../services/live_service.dart';
+import '../../services/signal_service.dart';
 import '../../data/models/live_room.dart';
 import '../../data/models/message.dart';
 import '../../theme/theme.dart';
@@ -24,13 +25,23 @@ class BroadcasterDashboardScreen extends StatefulWidget {
 
 class _BroadcasterDashboardScreenState
     extends State<BroadcasterDashboardScreen> {
-  final AgoraService _agora = AgoraService.instance;
+  final _media = MediaService.instance;
+  final _live = LiveService.instance;
 
+  // Signaling helper
+  final _signal = SignalService.instance;
+
+  // WebRTC state
+  RTCPeerConnection? _pc;
+  String? _roomId;
+  String? _userId;
+
+  // UI state
   bool isLive = false;
   bool micOn = true;
   bool camOn = true;
 
-  // simple in-memory chat for demo
+  // demo chat
   late List<Message> messages;
 
   @override
@@ -50,18 +61,28 @@ class _BroadcasterDashboardScreenState
 
   @override
   void dispose() {
-    // Safety cleanup if user leaves while live
-    if (isLive) {
-      final channel = widget.room?.id ?? defaultTestChannel;
-      _agora.leave();
-      LiveRegistry.instance.end(channel);
-    }
+    // Best-effort cleanup if user leaves while live
+    () async {
+      try {
+        await _media.leave();
+      } catch (_) {}
+      try {
+        if (_roomId != null) {
+          await _live.endLive(_roomId!);
+          await _signal.close(_roomId!);
+        }
+      } catch (_) {}
+      try {
+        await _pc?.close();
+    } catch (_) {}
+    _pc = null;
+    }();
     super.dispose();
   }
 
   Future<void> _goLiveToggle() async {
     if (!isLive) {
-      // Request permissions
+      // 1) Ask permissions
       final statuses =
       await [Permission.camera, Permission.microphone].request();
       final camOk = statuses[Permission.camera]?.isGranted ?? false;
@@ -74,32 +95,104 @@ class _BroadcasterDashboardScreenState
         return;
       }
 
-      final channel = widget.room?.id ?? defaultTestChannel;
+      // 2) Require auth
+      final userId = Supabase.instance.client.auth.currentUser?.id;
+      if (userId == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('You must be signed in to go live.')),
+        );
+        return;
+      }
+
+      // 3) Pick room id for this live
+      final channel = widget.room?.id ?? 'test-room';
+      _roomId = channel;
+      _userId = userId;
 
       try {
-        await _agora.joinAsBroadcaster(
-          channelId: channel,
-          token: agoraTempToken, // can be empty if App Certificate disabled
-        );
+        // 4) Start local capture (preview)
+        await _media.joinAsBroadcaster();
 
-        if (!mounted) return;
-        setState(() => isLive = true);
+        // 5) Create PeerConnection + add local tracks
+        _pc = await _media.newPeerConnection(addLocalTracks: true);
 
-        // Publish this room to the in-memory live list (local)
+        // 6) Trickle ICE to Supabase
+        _pc!.onIceCandidate = (candidate) async {
+          if (_roomId == null || _userId == null) return;
+          if (candidate.candidate == null) return;
+          await _signal.sendIce(
+            _roomId!,
+            candidate: {
+              'candidate': candidate.candidate,
+              'sdpMid': candidate.sdpMid,
+              'sdpMLineIndex': candidate.sdpMLineIndex,
+            },
+            from: _userId!,
+          );
+        };
+
+        // 7) Open signaling channel
+        await _signal.open(channel);
+
+        // 8) Create and set local SDP offer
+        final offer = await _pc!.createOffer();
+        await _pc!.setLocalDescription(offer);
+
+        // 9) Publish to DB so this live appears in listings
         final liveRoom = LiveRoom(
           id: channel,
           title: widget.room?.title ?? 'My Live',
           hostName: widget.room?.hostName ?? 'Broadcaster',
-          isLive: true,
           viewersCount: 0,
+          isLive: true,
+          status: 'live',
+          hostUserId: userId,
+          thumbnailUrl: null, // optional; you can upload a frame later
+          startedAt: DateTime.now(),
         );
-        LiveRegistry.instance.upsert(liveRoom);
+        await _live.startLive(liveRoom);
 
-        // Publish to RTM directory (cross-device)
+        // 10) Send the offer to viewers via Supabase
+        await _signal.sendOffer(channel, sdp: offer.sdp!, from: userId);
 
-        // Apply current UI toggles to engine
-        await _agora.setMicOn(micOn);
-        await _agora.setCameraOn(camOn);
+        // 11) Listen for ANSWER + remote ICE from viewers
+        _signal.listenAnswers(channel, onData: (data) async {
+          final sdp = data['sdp'] as String?;
+          if (sdp == null || _pc == null) return;
+          final current = await _pc!.getRemoteDescription();
+          if (current == null) {
+            await _pc!.setRemoteDescription(
+              RTCSessionDescription(sdp, 'answer'),
+            );
+            debugPrint('[SIGNAL] Remote ANSWER set');
+          }
+        });
+
+        _signal.listenIce(channel, onData: (data) async {
+          if (_pc == null) return;
+          final cand = Map<String, dynamic>.from(
+            data['candidate'] as Map,
+          );
+          final ice = RTCIceCandidate(
+            cand['candidate'] as String?,
+            cand['sdpMid'] as String?,
+            (cand['sdpMLineIndex'] as num?)?.toInt(),
+          );
+          try {
+            await _pc!.addCandidate(ice);
+            debugPrint('[SIGNAL] Remote ICE added');
+          } catch (e) {
+            debugPrint('[SIGNAL] addCandidate error: $e');
+          }
+        });
+
+        if (!mounted) return;
+        setState(() => isLive = true);
+
+        // Apply UI toggles
+        await _media.setMicOn(micOn);
+        await _media.setCameraOn(camOn);
       } catch (e) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -107,12 +200,20 @@ class _BroadcasterDashboardScreenState
         );
       }
     } else {
-      // Stop live
-      final channel = widget.room?.id ?? defaultTestChannel;
-      await _agora.leave();
-      LiveRegistry.instance.end(channel);
-      if (!mounted) return;
-      setState(() => isLive = false);
+      // ==== STOP LIVE ====
+      try {
+        await _media.leave();
+        final id = _roomId ?? widget.room?.id ?? 'test-room';
+        await _live.endLive(id);
+        await _signal.close(id);
+        await _pc?.close();
+        _pc = null;
+      } catch (e) {
+        // ignore
+      } finally {
+        if (!mounted) return;
+        setState(() => isLive = false);
+      }
     }
   }
 
@@ -161,21 +262,20 @@ class _BroadcasterDashboardScreenState
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
-            // Live preview (Agora when live)
+            // Live preview
             AspectRatio(
               aspectRatio: 16 / 9,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
                 child: Stack(
                   children: [
-                    // Show local camera when live, placeholder otherwise
                     Positioned.fill(
                       child: isLive
-                          ? AgoraVideoView(
-                        controller: VideoViewController(
-                          rtcEngine: _agora.engine,
-                          canvas: const VideoCanvas(uid: 0), // local preview
-                        ),
+                          ? RTCVideoView(
+                        _media.localRenderer,
+                        mirror: true,
+                        objectFit: RTCVideoViewObjectFit
+                            .RTCVideoViewObjectFitCover,
                       )
                           : Container(
                         decoration: BoxDecoration(
@@ -223,7 +323,7 @@ class _BroadcasterDashboardScreenState
             ),
             const SizedBox(height: 16),
 
-            // Controls grid
+            // Controls
             GridView.count(
               crossAxisCount: 2,
               shrinkWrap: true,
@@ -232,36 +332,28 @@ class _BroadcasterDashboardScreenState
               crossAxisSpacing: 12,
               childAspectRatio: 1.9,
               children: [
-                // Mic
                 ControlTile(
                   icon: micOn ? Icons.mic : Icons.mic_off,
                   label: micOn ? 'Mute Microphone' : 'Unmute Microphone',
                   onTap: () async {
                     setState(() => micOn = !micOn);
-                    if (isLive) {
-                      await _agora.setMicOn(micOn);
-                    }
+                    if (isLive) await _media.setMicOn(micOn);
                   },
                 ),
-                // Camera
                 ControlTile(
                   icon: camOn ? Icons.videocam : Icons.videocam_off,
                   label: camOn ? 'Turn Camera Off' : 'Turn Camera On',
                   onTap: () async {
                     setState(() => camOn = !camOn);
-                    if (isLive) {
-                      await _agora.setCameraOn(camOn);
-                    }
+                    if (isLive) await _media.setCameraOn(camOn);
                   },
                 ),
-                // Go Live / Stop
                 ControlTile(
                   icon: isLive ? Icons.pause_circle : Icons.play_circle,
                   label: isLive ? 'Stop Live' : 'Go Live',
                   onTap: _goLiveToggle,
                   highlight: true,
                 ),
-                // Switch camera
                 ControlTile(
                   icon: Icons.flip_camera_android_outlined,
                   label: 'Switch Camera',
@@ -274,10 +366,9 @@ class _BroadcasterDashboardScreenState
                       );
                       return;
                     }
-                    await _agora.switchCamera();
+                    await _media.switchCamera();
                   },
                 ),
-                // Share
                 ControlTile(
                   icon: Icons.share_outlined,
                   label: 'Share Stream Link',
@@ -285,7 +376,6 @@ class _BroadcasterDashboardScreenState
                     const SnackBar(content: Text('Share coming soon')),
                   ),
                 ),
-                // Chat
                 ControlTile(
                   icon: Icons.chat_bubble_outline,
                   label: 'Chat Settings',
@@ -306,16 +396,18 @@ class _BroadcasterDashboardScreenState
                 ),
               ),
               onPressed: () async {
-                // Also remove from list here when ending via button
                 if (isLive) {
-                  final channel = widget.room?.id ?? defaultTestChannel;
-                  await _agora.leave();
-                  LiveRegistry.instance.end(channel);
-                  if (mounted) {
-                    setState(() => isLive = false);
-                  }
+                  try {
+                    await _media.leave();
+                    final id = _roomId ?? widget.room?.id ?? 'test-room';
+                    await _live.endLive(id);
+                    await _signal.close(id);
+                    await _pc?.close();
+                    _pc = null;
+                  } catch (_) {}
+                  if (mounted) setState(() => isLive = false);
                 }
-                if (mounted) context.pop(); // back to previous screen
+                if (mounted) context.pop();
               },
               icon: const Icon(Icons.stop_circle_outlined),
               label: const Text('End Stream'),
@@ -349,7 +441,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
   void _handleSend(String text) {
     widget.onSend(text);
     setState(() {}); // refresh list
-    // scroll to bottom after sending
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (widget.scrollController.hasClients) {
         widget.scrollController.animateTo(
@@ -373,7 +464,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
         child: Column(
           children: [
             const SizedBox(height: 8),
-            // grab handle
             Container(
               width: 44,
               height: 4,
@@ -383,7 +473,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
               ),
             ),
             const SizedBox(height: 8),
-            // header
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(
@@ -409,7 +498,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
             ),
             const Divider(height: 1, color: AppTheme.surfaceVariant),
 
-            // messages
             Expanded(
               child: ListView.builder(
                 controller: widget.scrollController,
@@ -425,8 +513,9 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
                       children: [
                         CircleAvatar(
                           radius: 14,
-                          backgroundColor:
-                          isHost ? AppTheme.primary : AppTheme.surfaceVariant,
+                          backgroundColor: isHost
+                              ? AppTheme.primary
+                              : AppTheme.surfaceVariant,
                           child: Text(
                             m.from.characters.first.toUpperCase(),
                             style: const TextStyle(fontSize: 12),
@@ -467,8 +556,6 @@ class _ChatBottomSheetState extends State<_ChatBottomSheet> {
               ),
             ),
 
-            // composer
-            // ignore: avoid_redundant_argument_values
             ChatComposer(onSend: _handleSend),
           ],
         ),

@@ -1,6 +1,9 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // for Clipboard
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart'; // <-- NEW
+
 import '../../data/models/live_room.dart';
 import '../../theme/theme.dart';
 import '../../widgets/gradient_button.dart';
@@ -15,12 +18,13 @@ class CreateRoomScreen extends StatefulWidget {
 class _CreateRoomScreenState extends State<CreateRoomScreen> {
   final titleCtrl = TextEditingController();
   final nameCtrl = TextEditingController(text: 'Broadcaster');
-  late String roomId;
+  late String roomId; // UUID
 
   @override
   void initState() {
     super.initState();
-    roomId = _generateRoomId();
+    // Generate a UUID that matches the DB column type
+    roomId = const Uuid().v4();
   }
 
   @override
@@ -30,19 +34,27 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
     super.dispose();
   }
 
-  String _generateRoomId() {
-    final rnd = Random();
-    return (100000 + rnd.nextInt(899999)).toString();
-  }
-
   void _start() {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You must be signed in to create a room.')),
+      );
+      return;
+    }
+
     final room = LiveRoom(
-      id: roomId,
-      title: titleCtrl.text.isEmpty ? 'My Live' : titleCtrl.text,
-      hostName: nameCtrl.text.isEmpty ? 'Broadcaster' : nameCtrl.text,
+      id: roomId, // <-- UUID now
+      title: titleCtrl.text.isEmpty ? 'My Live' : titleCtrl.text.trim(),
+      hostName: nameCtrl.text.isEmpty ? 'Broadcaster' : nameCtrl.text.trim(),
       viewersCount: 0,
       isLive: false,
+      status: 'preparing',
+      hostUserId: userId,
+      thumbnailUrl: null,
+      // startedAt/endedAt set when going live / ending
     );
+
     context.push('/broadcast/dashboard', extra: room);
   }
 
@@ -60,6 +72,10 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
               children: [
                 _InfoTile(label: 'Room ID', value: roomId),
                 const SizedBox(height: 12),
+
+                // Optional: show/allow editing display name (hidden UI for now)
+                // TextField(controller: nameCtrl, ...)
+
                 TextField(
                   controller: titleCtrl,
                   decoration: const InputDecoration(
@@ -67,20 +83,22 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
                     prefixIcon: Icon(Icons.title),
                   ),
                 ),
-
                 const SizedBox(height: 20),
+
                 GradientButton(
                   label: 'Start',
                   icon: Icons.videocam_outlined,
                   onPressed: _start,
                 ),
                 const SizedBox(height: 12),
+
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     OutlinedButton.icon(
-                      onPressed: () {
-                        // copy to clipboard later
+                      onPressed: () async {
+                        await Clipboard.setData(ClipboardData(text: roomId));
+                        if (!mounted) return;
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Room ID copied')),
                         );
@@ -114,13 +132,15 @@ class _InfoTile extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       child: Row(
         children: [
-          Text('$label: ',
-              style:
-              const TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
+          Text(
+            '$label: ',
+            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+          ),
           const SizedBox(width: 4),
-          SelectableText(value,
-              style:
-              const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+          SelectableText(
+            value,
+            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+          ),
         ],
       ),
     );

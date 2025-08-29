@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../theme/theme.dart';
 import '../../widgets/gradient_button.dart';
 
@@ -24,15 +25,36 @@ class _SignInScreenState extends State<SignInScreen> {
     super.dispose();
   }
 
-  void _submit() async {
+  Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _loading = true);
 
-    // TODO: call your real auth API here
-    await Future.delayed(const Duration(milliseconds: 600));
+    final supa = Supabase.instance.client;
 
-    if (!mounted) return;
-    context.go('/home'); // go to main app (Start Live / View Lives)
+    try {
+      await supa.auth.signInWithPassword(
+        email: _emailCtrl.text.trim(),
+        password: _passCtrl.text,
+      );
+
+      // Navigation note:
+      // Our GoRouter is auth-aware and will auto-redirect to /home,
+      // but calling go('/home') is fine too for immediate feedback.
+      if (!mounted) return;
+      context.go('/home');
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unexpected error: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   @override
@@ -53,6 +75,8 @@ class _SignInScreenState extends State<SignInScreen> {
                     style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
                   ),
                   const SizedBox(height: 18),
+
+                  // Email
                   TextFormField(
                     controller: _emailCtrl,
                     keyboardType: TextInputType.emailAddress,
@@ -70,6 +94,8 @@ class _SignInScreenState extends State<SignInScreen> {
                     },
                   ),
                   const SizedBox(height: 12),
+
+                  // Password
                   TextFormField(
                     controller: _passCtrl,
                     obscureText: _obscure,
@@ -87,18 +113,34 @@ class _SignInScreenState extends State<SignInScreen> {
                     (v == null || v.length < 6) ? 'Min 6 characters' : null,
                   ),
                   const SizedBox(height: 20),
+
+                  // Sign in button
                   GradientButton(
                     label: _loading ? 'Signing in...' : 'Sign In',
                     icon: Icons.login,
-                    onPressed: _loading ? () {} : _submit,
+                    onPressed: _loading ? null : () { _submit(); },
+
                   ),
+
                   const SizedBox(height: 10),
+
+                  // Create account
                   TextButton(
-                    onPressed: () => context.push('/auth/signup'),
+                    onPressed: _loading ? null : () => context.push('/auth/signup'),
                     child: const Text('Create an account'),
                   ),
+
+                  // Guest (disabled for now; router requires auth)
                   TextButton(
-                    onPressed: () => context.go('/home'),
+                    onPressed: _loading
+                        ? null
+                        : () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Guest mode coming soon. Please sign in.'),
+                        ),
+                      );
+                    },
                     child: const Text('Continue as Guest'),
                   ),
                 ],

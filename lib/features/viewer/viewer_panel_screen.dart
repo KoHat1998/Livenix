@@ -1,13 +1,17 @@
-import 'package:flutter/material.dart';
-import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+import 'dart:math';
 
-import '../../core/agora_config.dart';
-import '../../services/agora_service.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../../data/models/live_room.dart';
 import '../../data/models/message.dart';
+import '../../services/media_service.dart';
+import '../../services/signal_service.dart';
+import '../../services/live_service.dart';
 import '../../theme/theme.dart';
-import '../../widgets/live_badge.dart';
 import '../../widgets/chat_composer.dart';
+import '../../widgets/live_badge.dart';
 
 class ViewerPanelScreen extends StatefulWidget {
   final LiveRoom? room;
@@ -18,22 +22,27 @@ class ViewerPanelScreen extends StatefulWidget {
 }
 
 class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
-  final AgoraService _agora = AgoraService.instance;
-
+  // UI
+  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   late List<Message> messages;
   bool muted = false;
 
-  int? _hostUid; // first remote we detect (host)
-  late final String _channelId;
+  // WebRTC / signaling
+  final _media = MediaService.instance;
+  final _signal = SignalService.instance;
+  final _live = LiveService.instance;
 
-  // keep reference to remove listener in dispose
-  VoidCallback? _uidsListenerCancel;
+  RTCPeerConnection? _pc;
+  String? _roomId;
+  String? _userId;
 
   @override
   void initState() {
     super.initState();
+    _initRenderer();
+    _bootstrap();
 
-    // demo chat data
+    // demo chat messages (local only for now)
     messages = List.generate(
       12,
           (i) => Message(
@@ -44,35 +53,127 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
         isHost: i % 3 == 0,
       ),
     );
+  }
 
-    // Join Agora as audience
-    _channelId = widget.room?.id ?? defaultTestChannel;
-    _agora.joinAsAudience(channelId: _channelId, token: agoraTempToken);
+  Future<void> _initRenderer() async {
+    await _remoteRenderer.initialize();
+  }
 
-    // Track remote user(s) and display the first one (host)
-    void uidsListener() {
-      if (!mounted) return;
-      final list = _agora.remoteUids.value;
-      setState(() {
-        _hostUid = list.isEmpty ? null : list.first;
-      });
-    }
+  Future<void> _bootstrap() async {
+    // Resolve IDs
+    _roomId = widget.room?.id ?? 'test-room';
+    final authUser = Supabase.instance.client.auth.currentUser;
+    _userId = authUser?.id ?? 'guest-${Random().nextInt(999999)}';
 
-    _agora.remoteUids.addListener(uidsListener);
-    _uidsListenerCancel = () => _agora.remoteUids.removeListener(uidsListener);
+    // When the broadcaster publishes an SDP offer -> answer it
+    _signal.listenOffers(_roomId!, onData: (data) async {
+      try {
+        // Ignore duplicates if we already built a PC
+        if (_pc != null) return;
+
+        // 1) Viewer creates PC without local tracks (receive-only)
+        _pc = await _media.newPeerConnection(addLocalTracks: false);
+
+        // Pipe remote media into the UI
+        _pc!.onTrack = (evt) {
+          final stream = evt.streams.isNotEmpty ? evt.streams.first : null;
+          if (stream != null) {
+            _remoteRenderer.srcObject = stream;
+            setState(() {}); // refresh video
+          }
+        };
+
+        // Helpful logs (optional)
+        _pc!.onConnectionState = (s) => debugPrint('viewer pc state: $s');
+        _pc!.onIceConnectionState = (s) => debugPrint('viewer ICE: $s');
+
+        // 2) Trickle ICE back to signaling
+        _pc!.onIceCandidate = (candidate) async {
+          if (candidate == null) return;
+          await _signal.sendIce(
+            _roomId!,
+            candidate: {
+              'candidate': candidate.candidate,
+              'sdpMid': candidate.sdpMid,
+              'sdpMLineIndex': candidate.sdpMLineIndex, // keep this exact key
+            },
+            from: _userId!,
+          );
+        };
+
+        // 3) Apply broadcaster's offer
+        final sdp = data['sdp'] as String?;
+        final type = (data['type'] ?? 'offer') as String;
+        if (sdp == null) return;
+        await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));
+
+        // 4) Create + set answer, then send it via signaling
+        final answer = await _pc!.createAnswer();
+        await _pc!.setLocalDescription(answer);
+
+        await _signal.sendAnswer(
+          _roomId!,               // <-- positional roomId (fix)
+          sdp: answer.sdp!,       // service assumes type='answer'
+          from: _userId!,
+        );
+      } catch (e) {
+        debugPrint('viewer listenOffers error: $e');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to accept offer: $e')),
+        );
+      }
+    });
+
+    // Add remote ICE from broadcaster to our PC
+    _signal.listenIce(_roomId!, onData: (payload) async {
+      try {
+        final pc = _pc;
+        if (pc == null) return;
+
+        final candMap =
+        (payload['candidate'] ?? payload) as Map<String, dynamic>;
+        final cand = RTCIceCandidate(
+          candMap['candidate'] as String,
+          candMap['sdpMid'] as String?,
+          (candMap['sdpMLineIndex'] as num?)?.toInt(),
+        );
+        await pc.addCandidate(cand);
+      } catch (_) {}
+    });
+
+    // (Optional) bump viewer count
+    try {
+      await _live.incrementViewers(_roomId!);
+    } catch (_) {}
   }
 
   @override
   void dispose() {
-    _uidsListenerCancel?.call();
-    _agora.leave(); // leave channel when exiting viewer
+    _cleanupViewer();
     super.dispose();
   }
 
-  Future<bool> _onWillPop() async {
-    // ensure we leave cleanly if user presses back
-    await _agora.leave();
-    return true;
+  Future<void> _cleanupViewer() async {
+    try {
+      final roomId = _roomId;
+      _remoteRenderer.srcObject = null;
+      await _remoteRenderer.dispose();
+
+      if (_pc != null) {
+        try {
+          await _pc!.close();
+        } catch (_) {}
+      }
+      _pc = null;
+
+      if (roomId != null) {
+        try {
+          await _live.decrementViewers(roomId);
+        } catch (_) {}
+        // We keep the realtime channel open; SignalService can reuse it.
+      }
+    } catch (_) {}
   }
 
   void _send(String text) {
@@ -92,97 +193,78 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
   @override
   Widget build(BuildContext context) {
     final room = widget.room;
-    return WillPopScope(
-      onWillPop: _onWillPop,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(room?.title ?? 'Live Stream'),
-          actions: [
-            IconButton(
-              onPressed: () async {
-                setState(() => muted = !muted);
-                // Mute/unmute remote playback audio (0 = mute, 100 = normal)
-                await _agora.engine
-                    .adjustPlaybackSignalVolume(muted ? 0 : 100);
-              },
-              icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
-              tooltip: muted ? 'Unmute' : 'Mute',
-            ),
-          ],
-        ),
-        body: Column(
-          children: [
-            // Video stage (remote view if available)
-            AspectRatio(
-              aspectRatio: 16 / 9,
-              child: Stack(
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.zero,
-                    child: (_hostUid != null)
-                        ? AgoraVideoView(
-                      controller: VideoViewController.remote(
-                        rtcEngine: _agora.engine,
-                        canvas: VideoCanvas(uid: _hostUid!),
-                        connection: RtcConnection(
-                          channelId:
-                          _agora.currentChannelId ?? _channelId,
-                        ),
-                      ),
-                    )
-                        : Container(
-                      decoration: BoxDecoration(
-                        gradient: AppTheme.primaryGradient,
-                      ),
-                      child: const Center(
-                        child: Icon(Icons.live_tv_outlined, size: 64),
-                      ),
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(room?.title ?? 'Live Stream'),
+        actions: [
+          IconButton(
+            onPressed: () async {
+              setState(() => muted = !muted);
+              // Optional: wire to actual audio control when you manage tracks.
+            },
+            icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
+            tooltip: muted ? 'Unmute' : 'Mute',
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Video stage
+          AspectRatio(
+            aspectRatio: 16 / 9,
+            child: Stack(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.zero,
+                  child: RTCVideoView(
+                    _remoteRenderer,
+                    objectFit:
+                    RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  ),
+                ),
+                Positioned(
+                  left: 12,
+                  top: 12,
+                  child: LiveBadge(isLive: room?.isLive ?? true),
+                ),
+                Positioned(
+                  right: 12,
+                  top: 12,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppTheme.surface,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.remove_red_eye_outlined, size: 16),
+                        const SizedBox(width: 6),
+                        Text('${room?.viewersCount ?? 0}'),
+                      ],
                     ),
                   ),
-                  Positioned(
-                    left: 12,
-                    top: 12,
-                    child: LiveBadge(isLive: room?.isLive ?? true),
-                  ),
-                  Positioned(
-                    right: 12,
-                    top: 12,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: AppTheme.surface,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.remove_red_eye_outlined, size: 16),
-                          const SizedBox(width: 6),
-                          Text('${room?.viewersCount ?? 128}'),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
+          ),
 
-            // Chat list
-            Expanded(
-              child: ListView.builder(
-                padding: const EdgeInsets.all(12),
-                itemCount: messages.length,
-                itemBuilder: (context, i) {
-                  final m = messages[i];
-                  return _ChatBubble(msg: m);
-                },
-              ),
+          // Chat list (local-only placeholder)
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: messages.length,
+              itemBuilder: (context, i) => _ChatBubble(msg: messages[i]),
             ),
+          ),
 
-            // Composer
-            ChatComposer(onSend: _send),
-          ],
-        ),
+          // Composer (local-only placeholder)
+          ChatComposer(onSend: _send),
+        ],
       ),
     );
   }
@@ -224,8 +306,9 @@ class _ChatBubble extends StatelessWidget {
                     msg.from,
                     style: TextStyle(
                       fontWeight: FontWeight.w700,
-                      color:
-                      isHost ? AppTheme.textPrimary : AppTheme.textSecondary,
+                      color: isHost
+                          ? AppTheme.textPrimary
+                          : AppTheme.textSecondary,
                     ),
                   ),
                   const SizedBox(height: 4),
