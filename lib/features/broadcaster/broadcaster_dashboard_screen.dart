@@ -29,13 +29,11 @@ class _BroadcasterDashboardScreenState
   final _live = LiveService.instance;
   final _signal = SignalService.instance;
 
-  RTCPeerConnection? _pc;
-  String? _roomId;
-  String? _userId;
-
   bool isLive = false;
   bool micOn = true;
   bool camOn = true;
+
+  Map<String, dynamic>? _routerRtpCapabilities;
 
   late List<Message> messages;
 
@@ -56,7 +54,6 @@ class _BroadcasterDashboardScreenState
 
   @override
   void dispose() {
-    // fire-and-forget cleanup
     _stopLive();
     super.dispose();
   }
@@ -66,16 +63,12 @@ class _BroadcasterDashboardScreenState
       await _media.leave();
     } catch (_) {}
     try {
-      final id = _roomId ?? widget.room?.id;
-      if (id != null) {
-        await _live.endLive(id);
-        await _signal.close(id);
-      }
+      final id = widget.room?.id;
+      if (id != null) await _live.endLive(id);
     } catch (_) {}
     try {
-      await _pc?.close();
+      _signal.disconnect();
     } catch (_) {}
-    _pc = null;
     if (mounted) setState(() => isLive = false);
   }
 
@@ -104,81 +97,25 @@ class _BroadcasterDashboardScreenState
         return;
       }
 
-      // 3) Resolve IDs
-      final channel = widget.room?.id ?? 'test-room';
-      _roomId = channel;
-      _userId = userId;
-
       try {
-        // 4) Local preview capture
+        // 3) Local preview
         await _media.joinAsBroadcaster();
 
-        // 5) Create PeerConnection w/ local tracks
-        _pc = await _media.newPeerConnection(addLocalTracks: true);
+        // 4) Connect signaling & join role
+        await _signal.connect();
+        await _signal.joinAsBroadcaster();
 
-        // 6) Trickle our ICE to signaling
-        _pc!.onIceCandidate = (candidate) async {
-          if (candidate.candidate == null ||
-              _roomId == null ||
-              _userId == null) {
-            return;
-          }
-          await _signal.sendIce(
-            _roomId!,
-            candidate: {
-              'candidate': candidate.candidate,
-              'sdpMid': candidate.sdpMid,
-              'sdpMLineIndex': candidate.sdpMLineIndex,
-            },
-            from: _userId!,
-          );
-        };
+        // Optional logs
+        _signal.onBroadcasterStarted((_) => debugPrint('[Broadcaster] started'));
+        _signal.onBroadcasterLeft((_) => debugPrint('[Broadcaster] left'));
 
-        // 7) Open channel & register listeners BEFORE sending offer
-        await _signal.open(channel);
+        // 5) Fetch router RTP caps (we’ll use these when adding Mediasoup client)
+        _routerRtpCapabilities = await _signal.getRouterRtpCapabilities();
+        debugPrint('[Broadcaster] Router caps: $_routerRtpCapabilities');
 
-        // Answer listener (first answer wins)
-        _signal.listenAnswers(channel, onData: (data) async {
-          try {
-            final sdp = data['sdp'] as String?;
-            final pc = _pc;
-            if (sdp == null || pc == null) return;
-            final current = await pc.getRemoteDescription();
-            if (current == null) {
-              await pc.setRemoteDescription(
-                RTCSessionDescription(sdp, 'answer'),
-              );
-              debugPrint('[SIGNAL] Remote ANSWER set');
-            }
-          } catch (e) {
-            debugPrint('[SIGNAL] setRemoteDescription(answer) error: $e');
-          }
-        });
-
-        // ICE from viewers
-        _signal.listenIce(channel, onData: (data) async {
-          try {
-            final pc = _pc;
-            if (pc == null) return;
-            final cand = Map<String, dynamic>.from(data['candidate'] as Map);
-            final ice = RTCIceCandidate(
-              cand['candidate'] as String?,
-              cand['sdpMid'] as String?,
-              (cand['sdpMLineIndex'] as num?)?.toInt(),
-            );
-            await pc.addCandidate(ice);
-          } catch (e) {
-            debugPrint('[SIGNAL] addCandidate error: $e');
-          }
-        });
-
-        // 8) Create & set local SDP offer
-        final offer = await _pc!.createOffer();
-        await _pc!.setLocalDescription(offer);
-
-        // 9) Publish to DB so viewers can see it
+        // 6) Publish room metadata to DB so viewers see the card
         final liveRoom = LiveRoom(
-          id: channel,
+          id: widget.room?.id ?? 'test-room',
           title: widget.room?.title ?? 'My Live',
           hostName: widget.room?.hostName ?? 'Broadcaster',
           viewersCount: 0,
@@ -190,19 +127,22 @@ class _BroadcasterDashboardScreenState
         );
         await _live.startLive(liveRoom);
 
-        // 10) Send the offer
-        await _signal.sendOffer(channel, sdp: offer.sdp!, from: userId);
-
         if (!mounted) return;
         setState(() => isLive = true);
 
-        // 11) Apply mic/cam toggles
+        // 7) Apply mic/cam toggles
         await _media.setMicOn(micOn);
         await _media.setCameraOn(camOn);
+
+        // NOTE: Producing to mediasoup requires a client library that Flutter lacks.
+        // When we add a flutter-compatible mediasoup client, we’ll:
+        //   - create a SEND transport,
+        //   - connect it,
+        //   - produce audio/video using local tracks from MediaService.
       } catch (e) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to start live: $e')),
+          SnackBar(content: Text('Failed to go live: $e')),
         );
       }
     } else {
@@ -242,7 +182,7 @@ class _BroadcasterDashboardScreenState
         );
       },
     ).then((_) {
-      if (mounted) setState(() {}); // refresh after closing
+      if (mounted) setState(() {});
     });
   }
 
@@ -287,8 +227,8 @@ class _BroadcasterDashboardScreenState
                       right: 12,
                       bottom: 12,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 6),
+                        padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                         decoration: BoxDecoration(
                           color: AppTheme.surface,
                           borderRadius: BorderRadius.circular(12),
@@ -350,27 +290,13 @@ class _BroadcasterDashboardScreenState
                   label: 'Switch Camera',
                   onTap: () async {
                     if (!isLive) {
-                      if (!mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text('Go live to switch camera')),
+                        const SnackBar(content: Text('Go live to switch camera')),
                       );
                       return;
                     }
                     await _media.switchCamera();
                   },
-                ),
-                ControlTile(
-                  icon: Icons.share_outlined,
-                  label: 'Share Stream Link',
-                  onTap: () => ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Share coming soon')),
-                  ),
-                ),
-                ControlTile(
-                  icon: Icons.chat_bubble_outline,
-                  label: 'Chat Settings',
-                  onTap: _openChatSheet,
                 ),
               ],
             ),
@@ -386,9 +312,7 @@ class _BroadcasterDashboardScreenState
                 ),
               ),
               onPressed: () async {
-                if (isLive) {
-                  await _stopLive();
-                }
+                if (isLive) await _stopLive();
                 if (mounted) context.pop();
               },
               icon: const Icon(Icons.stop_circle_outlined),
@@ -401,7 +325,7 @@ class _BroadcasterDashboardScreenState
   }
 }
 
-/// Sliding chat bottom sheet
+/// Chat bottom sheet
 class _ChatBottomSheet extends StatefulWidget {
   final String roomTitle;
   final ScrollController scrollController;

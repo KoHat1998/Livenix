@@ -1,14 +1,13 @@
+import 'dart:async';
 import 'dart:math';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../data/models/live_room.dart';
 import '../../data/models/message.dart';
-import '../../services/media_service.dart';
-import '../../services/signal_service.dart';
 import '../../services/live_service.dart';
+import '../../services/signal_service.dart';
 import '../../theme/theme.dart';
 import '../../widgets/chat_composer.dart';
 import '../../widgets/live_badge.dart';
@@ -22,17 +21,14 @@ class ViewerPanelScreen extends StatefulWidget {
 }
 
 class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
-  // UI
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+
   late List<Message> messages;
   bool muted = false;
 
-  // WebRTC / signaling
-  final _media = MediaService.instance;
   final _signal = SignalService.instance;
   final _live = LiveService.instance;
 
-  RTCPeerConnection? _pc;
   String? _roomId;
   String? _userId;
 
@@ -42,7 +38,6 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
     _initRenderer();
     _bootstrap();
 
-    // demo chat messages (local only for now)
     messages = List.generate(
       12,
           (i) => Message(
@@ -60,120 +55,73 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
   }
 
   Future<void> _bootstrap() async {
-    // Resolve IDs
     _roomId = widget.room?.id ?? 'test-room';
     final authUser = Supabase.instance.client.auth.currentUser;
     _userId = authUser?.id ?? 'guest-${Random().nextInt(999999)}';
 
-    // When the broadcaster publishes an SDP offer -> answer it
-    _signal.listenOffers(_roomId!, onData: (data) async {
-      try {
-        // Ignore duplicates if we already built a PC
-        if (_pc != null) return;
+    try {
+      await _signal.connect();
+      await _signal.joinAsViewer();
 
-        // 1) Viewer creates PC without local tracks (receive-only)
-        _pc = await _media.newPeerConnection(addLocalTracks: false);
+      _signal.onBroadcasterStarted((_) {
+        // If broadcaster already live or just started, attempt consume flow
+        _consumeVideo();
+      });
 
-        // Pipe remote media into the UI
-        _pc!.onTrack = (evt) {
-          final stream = evt.streams.isNotEmpty ? evt.streams.first : null;
-          if (stream != null) {
-            _remoteRenderer.srcObject = stream;
-            setState(() {}); // refresh video
-          }
-        };
+      _signal.onProducerClosed((data) {
+        // { kind: 'video' } etc.
+        debugPrint('[Viewer] Producer closed: $data');
+      });
 
-        // Helpful logs (optional)
-        _pc!.onConnectionState = (s) => debugPrint('viewer pc state: $s');
-        _pc!.onIceConnectionState = (s) => debugPrint('viewer ICE: $s');
+      await _live.incrementViewers(_roomId!);
+    } catch (e) {
+      debugPrint('[Viewer] bootstrap error: $e');
+    }
+  }
 
-        // 2) Trickle ICE back to signaling
-        _pc!.onIceCandidate = (candidate) async {
-          if (candidate == null) return;
-          await _signal.sendIce(
-            _roomId!,
-            candidate: {
-              'candidate': candidate.candidate,
-              'sdpMid': candidate.sdpMid,
-              'sdpMLineIndex': candidate.sdpMLineIndex, // keep this exact key
-            },
-            from: _userId!,
-          );
-        };
+  Future<void> _consumeVideo() async {
+    try {
+      final caps = await _signal.getRouterRtpCapabilities();
 
-        // 3) Apply broadcaster's offer
-        final sdp = data['sdp'] as String?;
-        final type = (data['type'] ?? 'offer') as String;
-        if (sdp == null) return;
-        await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));
+      final tResp = await _signal.createTransport('recv');
 
-        // 4) Create + set answer, then send it via signaling
-        final answer = await _pc!.createAnswer();
-        await _pc!.setLocalDescription(answer);
+      // NOTE:
+      // In a real mediasoup client, your local RecvTransport generates its own
+      // DTLS parameters. Here we just echo server’s DTLS parameters as a placeholder
+      // so the signaling path completes (no media decode yet).
+      await _signal.connectTransport(
+        tResp['id'],
+        tResp['dtlsParameters'],
+      );
 
-        await _signal.sendAnswer(
-          _roomId!,               // <-- positional roomId (fix)
-          sdp: answer.sdp!,       // service assumes type='answer'
-          from: _userId!,
-        );
-      } catch (e) {
-        debugPrint('viewer listenOffers error: $e');
-        if (!mounted) return;
+      final v = await _signal.consume(
+        tResp['id'],
+        'video',
+        caps,
+      );
+
+      await _signal.resume(v['id']);
+
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to accept offer: $e')),
+          const SnackBar(
+            content: Text('Connected to SFU (media playback pending client lib).'),
+          ),
         );
       }
-    });
-
-    // Add remote ICE from broadcaster to our PC
-    _signal.listenIce(_roomId!, onData: (payload) async {
-      try {
-        final pc = _pc;
-        if (pc == null) return;
-
-        final candMap =
-        (payload['candidate'] ?? payload) as Map<String, dynamic>;
-        final cand = RTCIceCandidate(
-          candMap['candidate'] as String,
-          candMap['sdpMid'] as String?,
-          (candMap['sdpMLineIndex'] as num?)?.toInt(),
-        );
-        await pc.addCandidate(cand);
-      } catch (_) {}
-    });
-
-    // (Optional) bump viewer count
-    try {
-      await _live.incrementViewers(_roomId!);
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[Viewer] consume flow error: $e');
+    }
   }
 
   @override
   void dispose() {
-    _cleanupViewer();
+    _remoteRenderer.dispose();
+    if (_roomId != null) {
+      _live.decrementViewers(_roomId!);
+    }
+    _signal.disconnect();
     super.dispose();
-  }
-
-  Future<void> _cleanupViewer() async {
-    try {
-      final roomId = _roomId;
-      _remoteRenderer.srcObject = null;
-      await _remoteRenderer.dispose();
-
-      if (_pc != null) {
-        try {
-          await _pc!.close();
-        } catch (_) {}
-      }
-      _pc = null;
-
-      if (roomId != null) {
-        try {
-          await _live.decrementViewers(roomId);
-        } catch (_) {}
-        // We keep the realtime channel open; SignalService can reuse it.
-      }
-    } catch (_) {}
   }
 
   void _send(String text) {
@@ -193,15 +141,14 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
   @override
   Widget build(BuildContext context) {
     final room = widget.room;
-
     return Scaffold(
       appBar: AppBar(
         title: Text(room?.title ?? 'Live Stream'),
         actions: [
           IconButton(
-            onPressed: () async {
+            onPressed: () {
               setState(() => muted = !muted);
-              // Optional: wire to actual audio control when you manage tracks.
+              // Hook to actual audio track volume when media is present.
             },
             icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
             tooltip: muted ? 'Unmute' : 'Mute',
@@ -210,18 +157,13 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
       ),
       body: Column(
         children: [
-          // Video stage
           AspectRatio(
             aspectRatio: 16 / 9,
             child: Stack(
               children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.zero,
-                  child: RTCVideoView(
-                    _remoteRenderer,
-                    objectFit:
-                    RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                  ),
+                RTCVideoView(
+                  _remoteRenderer,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                 ),
                 Positioned(
                   left: 12,
@@ -232,10 +174,7 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
                   right: 12,
                   top: 12,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
-                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     decoration: BoxDecoration(
                       color: AppTheme.surface,
                       borderRadius: BorderRadius.circular(12),
@@ -252,8 +191,6 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
               ],
             ),
           ),
-
-          // Chat list (local-only placeholder)
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.all(12),
@@ -261,8 +198,6 @@ class _ViewerPanelScreenState extends State<ViewerPanelScreen> {
               itemBuilder: (context, i) => _ChatBubble(msg: messages[i]),
             ),
           ),
-
-          // Composer (local-only placeholder)
           ChatComposer(onSend: _send),
         ],
       ),
